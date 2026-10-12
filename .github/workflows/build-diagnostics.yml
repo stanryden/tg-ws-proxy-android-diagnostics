@@ -132,7 +132,9 @@ jobs:
           p.write_text(s)
           print("Updated log discovery in", p)
           PY
-          grep -n "findProxyLog\|Файл proxy.log не найден" app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java
+          grep -n "findProxyLog\|Файл proxy.log не найден" app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java || true
+          echo "MainActivity methods for diagnostics:"
+          grep -n "private void\|share\|log\|Button" app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java || true
 
       - uses: actions/setup-java@v4
         with:
