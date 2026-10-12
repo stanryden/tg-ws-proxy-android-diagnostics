@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
 import threading
@@ -48,13 +49,31 @@ def load_config() -> dict:
     return dict(DEFAULT_CONFIG)
 
 def setup_logging(verbose: bool = False):
+    _ensure_dirs()
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
-    # Log to console only for Android
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG if verbose else logging.INFO)
-    ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
-    root.addHandler(ch)
+    if root.handlers:
+        root.handlers.clear()
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    level = logging.DEBUG if verbose else logging.INFO
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(level)
+    console.setFormatter(fmt)
+    root.addHandler(console)
+
+    # Persistent, bounded logs; available to the app for export.
+    log_path = APP_DIR / "proxy.log"
+    file_handler = RotatingFileHandler(
+        log_path, maxBytes=1_500_000, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)
+    log.info("Persistent diagnostics enabled: %s", log_path)
 
 def _run_proxy_thread(port: int, dc_opt: Dict[int, str], verbose: bool, host: str = '127.0.0.1'):
     global _async_stop
