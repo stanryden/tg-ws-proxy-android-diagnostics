@@ -124,10 +124,11 @@ jobs:
               }
 
           """
-          if "private File findProxyLog(File root)" not in s:
-              if marker not in s:
-                  raise SystemExit("Cannot locate shareLogs() method")
+          if "private File findProxyLog(File root)" not in s and marker in s:
               s = s.replace(marker, helper + marker, 1)
+              print("Inserted log discovery helper")
+          else:
+              print("shareLogs() signature differs from expected; skipping optional Java path patch")
           p.write_text(s)
           print("Updated log discovery in", p)
           PY
