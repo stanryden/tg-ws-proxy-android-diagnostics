@@ -406,37 +406,35 @@ class _MsgSplitter:
         cipher = Cipher(algorithms.AES(key_raw), modes.CTR(iv))
         self._dec = cipher.encryptor()
         self._dec.update(b'\x00' * 64)  # skip init packet
+        self._pending_cipher = b''
+        self._pending_plain = b''
 
     def split(self, chunk: bytes) -> List[bytes]:
-        """Decrypt to find message boundaries, return split ciphertext."""
-        plain = self._dec.update(chunk)
-        boundaries = []
+        """Return only complete MTProto messages; retain partial TCP reads."""
+        plain = self._pending_plain + self._dec.update(chunk)
+        cipher = self._pending_cipher + chunk
+        parts: List[bytes] = []
         pos = 0
         while pos < len(plain):
+            start = pos
             first = plain[pos]
             if first == 0x7f:
                 if pos + 4 > len(plain):
                     break
-                msg_len = (
-                    struct.unpack_from('<I', plain, pos + 1)[0] & 0xFFFFFF
-                ) * 4
+                msg_len = (struct.unpack_from('<I', plain, pos + 1)[0] & 0xFFFFFF) * 4
                 pos += 4
             else:
                 msg_len = first * 4
                 pos += 1
-            if msg_len == 0 or pos + msg_len > len(plain):
+            if msg_len <= 0 or pos + msg_len > len(plain):
+                pos = start
                 break
             pos += msg_len
-            boundaries.append(pos)
-        if len(boundaries) <= 1:
-            return [chunk]
-        parts = []
-        prev = 0
-        for b in boundaries:
-            parts.append(chunk[prev:b])
-            prev = b
-        if prev < len(chunk):
-            parts.append(chunk[prev:])
+            parts.append(cipher[start:pos])
+        self._pending_plain = plain[pos:]
+        self._pending_cipher = cipher[pos:]
+        if self._pending_plain:
+            log.debug("MTProto splitter buffered incomplete message: %d bytes", len(self._pending_plain))
         return parts
 
 
@@ -502,16 +500,19 @@ async def _bridge_ws(reader, writer, ws: RawWebSocket, label,
                 up_packets += 1
                 if splitter:
                     parts = splitter.split(chunk)
-                    if len(parts) > 1:
-                        await ws.send_batch(parts)
-                    else:
-                        await ws.send(parts[0])
+                    if parts:
+                        if len(parts) > 1:
+                            await ws.send_batch(parts)
+                        else:
+                            await ws.send(parts[0])
                 else:
                     await ws.send(chunk)
-        except (asyncio.CancelledError, ConnectionError, OSError):
-            return
-        except Exception as e:
-            log.debug("[%s] tcp->ws ended: %s", label, e)
+        except asyncio.CancelledError:
+            raise
+        except (ConnectionError, OSError) as e:
+            log.info("[%s] tcp->ws socket ended: %s", label, e)
+        except Exception:
+            log.exception("[%s] tcp->ws failed", label)
 
     async def ws_to_tcp():
         nonlocal down_bytes, down_packets
@@ -528,15 +529,26 @@ async def _bridge_ws(reader, writer, ws: RawWebSocket, label,
                 buf = writer.transport.get_write_buffer_size()
                 if buf > 262144:
                     await writer.drain()
-        except (asyncio.CancelledError, ConnectionError, OSError):
-            return
-        except Exception as e:
-            log.debug("[%s] ws->tcp ended: %s", label, e)
+        except asyncio.CancelledError:
+            raise
+        except (ConnectionError, OSError) as e:
+            log.info("[%s] ws->tcp socket ended: %s", label, e)
+        except Exception:
+            log.exception("[%s] ws->tcp failed", label)
 
-    tasks = [asyncio.create_task(tcp_to_ws()),
-             asyncio.create_task(ws_to_tcp())]
+    tasks = [asyncio.create_task(tcp_to_ws(), name=f"{label}-tcp-to-ws"),
+             asyncio.create_task(ws_to_tcp(), name=f"{label}-ws-to-tcp")]
     try:
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            if task.cancelled():
+                log.info("[%s] bridge task cancelled", label)
+            else:
+                exc = task.exception()
+                if exc:
+                    log.error("[%s] bridge task failed: %s", label, exc)
+                else:
+                    log.info("[%s] bridge direction finished: %s", label, task.get_name())
     finally:
         for t in tasks:
             t.cancel()
