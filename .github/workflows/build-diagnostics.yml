@@ -72,6 +72,10 @@ jobs:
           PY
       - name: Fix log path and export diagnostics
         run: |
+          mkdir -p app/src/main/python
+          cp android.py app/src/main/python/android.py
+          echo "Packaged Android Python entrypoint:"
+          grep -n "RotatingFileHandler\|Persistent diagnostics enabled" app/src/main/python/android.py
           python3 - <<'PY'
           from pathlib import Path
           p = Path("app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java")
