@@ -29,12 +29,62 @@ jobs:
           mkdir -p app/src/main/python/proxy
           cp proxy/tg_ws_proxy.py app/src/main/python/proxy/tg_ws_proxy.py
           touch app/src/main/python/proxy/__init__.py
-          # The proxy core already contains the corrected splitter bridge; skip the legacy patch.
 
-      - name: Inspect Android activity for diagnostics UI
+      - name: Add diagnostics export button
         run: |
-          sed -n '1,240p' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java
-          sed -n '1,220p' app/src/main/python/android_bridge.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java")
+          s = p.read_text()
+          s = s.replace("import android.widget.TextView;", "import android.widget.TextView;\nimport java.io.File;\nimport java.io.RandomAccessFile;\nimport java.io.IOException;")
+          anchor = "        layout.addView(stop);"
+          addition = """
+                  Button logs = new Button(this);
+                  logs.setText("Поделиться логами");
+                  logs.setOnClickListener(v -> shareLogs());
+                  layout.addView(logs);
+          """
+          if "Поделиться логами" not in s:
+              if anchor not in s:
+                  raise SystemExit("Cannot locate stop button insertion point")
+              s = s.replace(anchor, anchor + addition, 1)
+          method = r'''
+              private void shareLogs() {
+                  File logFile = new File(new File(getFilesDir(), "TgWsProxy"), "proxy.log");
+                  String contents;
+                  if (!logFile.isFile()) {
+                      contents = "Файл логов не найден: " + logFile.getAbsolutePath()
+                          + "\\nЗапустите прокси и повторите попытку.";
+                  } else {
+                      try (RandomAccessFile f = new RandomAccessFile(logFile, "r")) {
+                          long length = f.length();
+                          long start = Math.max(0, length - 120000);
+                          f.seek(start);
+                          byte[] bytes = new byte[(int)(length - start)];
+                          f.readFully(bytes);
+                          contents = "TG WS Proxy diagnostics (last " + bytes.length + " bytes)\\n"
+                              + new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+                          if (start > 0) contents = "[Начало файла обрезано; показан конец лога]\\n" + contents;
+                      } catch (IOException e) {
+                          contents = "Не удалось прочитать лог: " + e;
+                      }
+                  }
+                  Intent send = new Intent(Intent.ACTION_SEND);
+                  send.setType("text/plain");
+                  send.putExtra(Intent.EXTRA_SUBJECT, "TG WS Proxy — диагностические логи");
+                  send.putExtra(Intent.EXTRA_TEXT, contents);
+                  startActivity(Intent.createChooser(send, "Отправить диагностические логи"));
+              }
+          '''
+          if "private void shareLogs()" not in s:
+              marker = "    @Override protected void onResume()"
+              if marker not in s:
+                  raise SystemExit("Cannot locate lifecycle method insertion point")
+              s = s.replace(marker, method + "\\n" + marker, 1)
+          p.write_text(s)
+          print("Diagnostics export button inserted.")
+          PY
+          grep -n "Поделиться логами\|private void shareLogs" app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java
 
       - uses: actions/setup-java@v4
         with:
