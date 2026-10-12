@@ -151,7 +151,7 @@ jobs:
           grep -n 'Поделиться логами\|ACTION_SEND\|private void shareLogs\|RotatingFileHandler\|Persistent diagnostics enabled' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java app/src/main/python/android.py
           test "$(grep -c 'Поделиться логами' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java)" -eq 1
           test "$(grep -c 'Intent.ACTION_SEND' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java)" -eq 1
-          test "$(grep -c 'RotatingFileHandler' app/src/main/python/android.py)" -eq 1
+          test "$(grep -c 'RotatingFileHandler' app/src/main/python/android.py)" -ge 2
 
       - uses: actions/setup-java@v4
         with:
