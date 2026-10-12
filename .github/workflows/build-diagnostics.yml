@@ -67,6 +67,12 @@ jobs:
           s2, n = re.subn(pattern, lambda _m: replacement, s, count=1, flags=re.S)
           if n != 1:
               raise SystemExit(f"Could not replace setup_logging() in {p}")
+          # The Android UI calls start_proxy() directly; main() is not entered in embedded mode.
+          needle = "    cfg = _config\n"
+          if "setup_logging(_config.get(\"verbose\", False))" not in s2:
+              if needle not in s2:
+                  raise SystemExit("Could not find start_proxy() config initialization")
+              s2 = s2.replace(needle, needle + "    setup_logging(_config.get(\"verbose\", False))\n", 1)
           p.write_text(s2)
           print("Persistent file logging enabled in", p)
           PY
