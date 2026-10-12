@@ -70,73 +70,88 @@ jobs:
           p.write_text(s2)
           print("Persistent file logging enabled in", p)
           PY
-      - name: Fix log path and export diagnostics
+      - name: Add persistent diagnostics export UI
         run: |
           mkdir -p app/src/main/python
           cp android.py app/src/main/python/android.py
-          echo "Packaged Android Python entrypoint:"
-          grep -n "RotatingFileHandler\|Persistent diagnostics enabled" app/src/main/python/android.py
           python3 - <<'PY'
           from pathlib import Path
           p = Path("app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java")
           s = p.read_text()
-          # The Chaquopy Python HOME may be a subdirectory under filesDir; search for the actual log.
-          s = s.replace(
-              'File logFile = new File(new File(getFilesDir(), "TgWsProxy"), "proxy.log");',
-              'File logFile = findProxyLog(getFilesDir());'
-          )
-          s = s.replace(
-              'contents = "Файл логов не найден: " + logFile.getAbsolutePath()',
-              'contents = "Файл proxy.log не найден в каталоге приложения: " + getFilesDir().getAbsolutePath()'
-          )
-          marker = "    private void shareLogs() {"
-          helper = r"""
-              private File findProxyLog(File root) {
-                  File expected = new File(new File(root, "TgWsProxy"), "proxy.log");
-                  if (expected.isFile() && expected.length() > 0) return expected;
-                  File homeCandidate = new File(new File(new File(root, "home"), "TgWsProxy"), "proxy.log");
-                  if (homeCandidate.isFile() && homeCandidate.length() > 0) return homeCandidate;
-                  File[] children = root.listFiles();
-                  if (children != null) {
-                      for (File child : children) {
-                          if (child.isDirectory()) {
-                              File found = findProxyLogRecursive(child, 5);
-                              if (found != null) return found;
-                          }
-                      }
-                  }
-                  return expected;
-              }
-
-              private File findProxyLogRecursive(File dir, int depth) {
-                  if (depth < 0) return null;
-                  File direct = new File(dir, "proxy.log");
+          if 'import java.io.File;' not in s:
+              s = s.replace('import android.widget.TextView;\n', 'import android.widget.TextView;\nimport java.io.File;\nimport java.io.BufferedReader;\nimport java.io.FileInputStream;\nimport java.io.InputStreamReader;\nimport java.nio.charset.StandardCharsets;\n')
+          marker = '        TextView note = new TextView(this);'
+          button = '''        Button shareLogs = new Button(this);
+                  shareLogs.setText("Поделиться логами");
+                  shareLogs.setOnClickListener(v -> shareLogs());
+                  layout.addView(shareLogs);
+          '''
+          if 'shareLogs.setText("Поделиться логами")' not in s:
+              if marker not in s: raise SystemExit("Could not locate note insertion point in MainActivity")
+              s = s.replace(marker, button + marker, 1)
+          method_marker = '    @Override protected void onResume()'
+          method = r"""
+              private File findProxyLog(File root, int depth) {
+                  if (root == null || depth < 0 || !root.isDirectory()) return null;
+                  File direct = new File(root, "proxy.log");
                   if (direct.isFile() && direct.length() > 0) return direct;
-                  File[] children = dir.listFiles();
+                  File[] children = root.listFiles();
                   if (children == null) return null;
                   for (File child : children) {
                       if (child.isDirectory()) {
-                          File found = findProxyLogRecursive(child, depth - 1);
+                          File found = findProxyLog(child, depth - 1);
                           if (found != null) return found;
                       }
                   }
                   return null;
               }
 
+              private void shareLogs() {
+                  File logFile = findProxyLog(getFilesDir(), 8);
+                  if (logFile == null || !logFile.isFile()) {
+                      new android.app.AlertDialog.Builder(this)
+                          .setTitle("Логи пока не найдены")
+                          .setMessage("Запусти прокси, подожди несколько секунд и повтори. Если файла всё ещё нет, пришли скриншот этого сообщения.")
+                          .setPositiveButton("ОК", null).show();
+                      return;
+                  }
+                  StringBuilder contents = new StringBuilder();
+                  try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                          new FileInputStream(logFile), StandardCharsets.UTF_8))) {
+                      String line;
+                      while ((line = reader.readLine()) != null) {
+                          contents.append(line).append('\n');
+                          if (contents.length() > 1_800_000) {
+                              contents.append("\\n[Обрезано: лог слишком большой для передачи одним сообщением]\\n");
+                              break;
+                          }
+                      }
+                  } catch (Exception e) {
+                      new android.app.AlertDialog.Builder(this)
+                          .setTitle("Не удалось прочитать лог")
+                          .setMessage(e.toString())
+                          .setPositiveButton("ОК", null).show();
+                      return;
+                  }
+                  Intent send = new Intent(Intent.ACTION_SEND);
+                  send.setType("text/plain");
+                  send.putExtra(Intent.EXTRA_SUBJECT, "TG WS Proxy — proxy.log");
+                  send.putExtra(Intent.EXTRA_TEXT, "Файл: " + logFile.getAbsolutePath() + "\\n\\n" + contents);
+                  startActivity(Intent.createChooser(send, "Поделиться логами прокси"));
+              }
+
           """
-          if "private File findProxyLog(File root)" not in s and marker in s:
-              s = s.replace(marker, helper + marker, 1)
-              print("Inserted log discovery helper")
-          else:
-              print("shareLogs() signature differs from expected; skipping optional Java path patch")
+          if 'private void shareLogs()' not in s:
+              if method_marker not in s: raise SystemExit("Could not locate method insertion point in MainActivity")
+              s = s.replace(method_marker, method + method_marker, 1)
           p.write_text(s)
-          print("Updated log discovery in", p)
+          print("Diagnostics export UI and shareLogs() installed")
           PY
-          grep -n "findProxyLog\|Файл proxy.log не найден" app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java || true
-          echo "MainActivity source for diagnostics:"
-          sed -n "1,240p" app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java
-          echo "MainActivity methods for diagnostics:"
-          grep -n "private void\|share\|log\|Button" app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java || true
+          echo "Checking export UI and persistent logger:"
+          grep -n 'Поделиться логами\|ACTION_SEND\|private void shareLogs\|RotatingFileHandler\|Persistent diagnostics enabled' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java app/src/main/python/android.py
+          test "$(grep -c 'Поделиться логами' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java)" -eq 1
+          test "$(grep -c 'Intent.ACTION_SEND' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java)" -eq 1
+          test "$(grep -c 'RotatingFileHandler' app/src/main/python/android.py)" -eq 1
 
       - uses: actions/setup-java@v4
         with:
