@@ -31,10 +31,10 @@ jobs:
           touch app/src/main/python/proxy/__init__.py
           # The proxy core already contains the corrected splitter bridge; skip the legacy patch.
 
-      - name: Show Android UI source files
+      - name: Inspect Android activity for diagnostics UI
         run: |
-          find app/src/main -type f \( -name '*.kt' -o -name '*.java' -o -name '*.xml' -o -name '*.py' \) -print
-          grep -RniE 'Работает|Запускается|Button|button|share|export' app/src/main --include='*.kt' --include='*.java' --include='*.xml' --include='*.py' || true
+          sed -n '1,240p' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java
+          sed -n '1,220p' app/src/main/python/android_bridge.py
 
       - uses: actions/setup-java@v4
         with:
