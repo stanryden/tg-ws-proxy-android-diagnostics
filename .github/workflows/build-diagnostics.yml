@@ -1,0 +1,61 @@
+name: Build diagnostic APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Android scaffold
+        run: |
+          curl -fL --retry 3 \
+            https://raw.githubusercontent.com/stanryden/tg-ws-proxy-android/main/tg-ws-proxy-android-source-replacement.zip \
+            -o /tmp/source.zip
+          mkdir -p /tmp/source
+          unzip -q /tmp/source.zip -d /tmp/source
+          test -d /tmp/source/tg-ws-proxy-android-app
+          rsync -a --exclude='.github/' /tmp/source/tg-ws-proxy-android-app/ ./
+
+      - name: Embed proxy core
+        run: |
+          mkdir -p app/src/main/python/proxy
+          cp proxy/tg_ws_proxy.py app/src/main/python/proxy/tg_ws_proxy.py
+          touch app/src/main/python/proxy/__init__.py
+          test -f tools/patch_android_core.py
+          python3 -c "from pathlib import Path; p=Path('tools/patch_android_core.py'); s=p.read_text(); old='new_splitter, source, count=1, flags=re.S)'; new='lambda _: new_splitter, source, count=1, flags=re.S)'; assert old in s, 'Target line not found'; p.write_text(s.replace(old, new, 1))"
+          python3 tools/patch_android_core.py
+
+      - name: Show Android UI source files
+        run: |
+          find app/src/main -type f \( -name '*.kt' -o -name '*.java' -o -name '*.xml' -o -name '*.py' \) -print
+          grep -RniE 'Работает|Запускается|Button|button|share|export' app/src/main --include='*.kt' --include='*.java' --include='*.xml' --include='*.py' || true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/gradle-build-action@v3
+        with:
+          gradle-version: '8.9'
+          arguments: assembleDebug --stacktrace
+
+      - name: Verify APK
+        run: |
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tg-ws-proxy-diagnostics-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
