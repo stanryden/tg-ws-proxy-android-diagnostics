@@ -35,9 +35,10 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
-          p = Path("app/src/main/python/android.py")
-          if not p.exists():
-              raise SystemExit(f"Android Python entrypoint not found: {p}")
+          matches = list(Path("app/src/main/python").rglob("android.py"))
+          if len(matches) != 1:
+              raise SystemExit(f"Expected one android.py under app/src/main/python, found: {matches}")
+          p = matches[0]
           s = p.read_text()
           if "from logging.handlers import RotatingFileHandler" not in s:
               s = s.replace("import logging", "import logging\nfrom logging.handlers import RotatingFileHandler", 1)
@@ -62,14 +63,13 @@ jobs:
               log.info("Log file: %s", APP_DIR / "proxy.log")
           '''
           pattern = r"def setup_logging\(verbose: bool = False\):.*?(?=\ndef _run_proxy_thread\()"
-          s2, n = re.subn(pattern, replacement, s, count=1, flags=re.S)
+          s2, n = re.subn(pattern, lambda _m: replacement, s, count=1, flags=re.S)
           if n != 1:
-              raise SystemExit("Could not replace setup_logging() safely")
+              raise SystemExit(f"Could not replace setup_logging() in {p}")
           p.write_text(s2)
-          print("Persistent logging enabled:", p)
+          print("Persistent file logging enabled in", p)
           PY
-          grep -n "RotatingFileHandler\|Log file:" app/src/main/python/android.py
-
+          find app/src/main/python -name android.py -print
       - name: Add diagnostics export button
         run: |
           python3 - <<'PY'
