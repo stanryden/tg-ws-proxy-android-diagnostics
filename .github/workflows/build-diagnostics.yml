@@ -35,10 +35,15 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
-          matches = list(Path("app/src/main/python").rglob("android.py"))
-          if len(matches) != 1:
-              raise SystemExit(f"Expected one android.py under app/src/main/python, found: {matches}")
-          p = matches[0]
+          roots = [Path("app/src/main/python"), Path("app/src/main/assets"), Path("app/src/main")]
+          candidates = []
+          for root in roots:
+              if root.exists():
+                  candidates.extend(p for p in root.rglob("android.py") if p.is_file())
+          candidates = list(dict.fromkeys(candidates))
+          if len(candidates) != 1:
+              raise SystemExit(f"Expected one android.py in app sources, found: {candidates}")
+          p = candidates[0]
           s = p.read_text()
           if "from logging.handlers import RotatingFileHandler" not in s:
               s = s.replace("import logging", "import logging\nfrom logging.handlers import RotatingFileHandler", 1)
@@ -69,7 +74,6 @@ jobs:
           p.write_text(s2)
           print("Persistent file logging enabled in", p)
           PY
-          find app/src/main/python -name android.py -print
       - name: Add diagnostics export button
         run: |
           python3 - <<'PY'
