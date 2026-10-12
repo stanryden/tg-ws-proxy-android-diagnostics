@@ -36,7 +36,8 @@ jobs:
           from pathlib import Path
           p = Path("app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java")
           s = p.read_text()
-          s = s.replace("import android.widget.TextView;", "import android.widget.TextView;\nimport java.io.File;\nimport java.io.RandomAccessFile;\nimport java.io.IOException;")
+          if "import java.io.File;" not in s:
+              s = s.replace("import android.widget.TextView;", "import android.widget.TextView;\nimport java.io.File;\nimport java.io.RandomAccessFile;\nimport java.io.IOException;")
           anchor = "        layout.addView(stop);"
           addition = """
                   Button logs = new Button(this);
@@ -80,7 +81,7 @@ jobs:
               marker = "    @Override protected void onResume()"
               if marker not in s:
                   raise SystemExit("Cannot locate lifecycle method insertion point")
-              s = s.replace(marker, method + "\\n" + marker, 1)
+              s = s.replace(marker, method + "\n" + marker, 1)
           p.write_text(s)
           print("Diagnostics export button inserted.")
           PY
