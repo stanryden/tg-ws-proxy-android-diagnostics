@@ -29,9 +29,7 @@ jobs:
           mkdir -p app/src/main/python/proxy
           cp proxy/tg_ws_proxy.py app/src/main/python/proxy/tg_ws_proxy.py
           touch app/src/main/python/proxy/__init__.py
-          test -f tools/patch_android_core.py
-          python3 -c "from pathlib import Path; p=Path('tools/patch_android_core.py'); s=p.read_text(); old='new_splitter, source, count=1, flags=re.S)'; new='lambda _: new_splitter, source, count=1, flags=re.S)'; assert old in s, 'Target line not found'; p.write_text(s.replace(old, new, 1))"
-          python3 tools/patch_android_core.py
+          # The proxy core already contains the corrected splitter bridge; skip the legacy patch.
 
       - name: Show Android UI source files
         run: |
