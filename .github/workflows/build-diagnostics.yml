@@ -70,62 +70,64 @@ jobs:
           p.write_text(s2)
           print("Persistent file logging enabled in", p)
           PY
-      - name: Add diagnostics export button
+      - name: Fix log path and export diagnostics
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path("app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java")
           s = p.read_text()
-          if "import java.io.File;" not in s:
-              s = s.replace("import android.widget.TextView;", "import android.widget.TextView;\nimport java.io.File;\nimport java.io.RandomAccessFile;\nimport java.io.IOException;")
-          anchor = "        layout.addView(stop);"
-          addition = """
-                  Button logs = new Button(this);
-                  logs.setText("Поделиться логами");
-                  logs.setOnClickListener(v -> shareLogs());
-                  layout.addView(logs);
-          """
-          if "Поделиться логами" not in s:
-              if anchor not in s:
-                  raise SystemExit("Cannot locate stop button insertion point")
-              s = s.replace(anchor, anchor + addition, 1)
-          method = r'''
-              private void shareLogs() {
-                  File logFile = new File(new File(getFilesDir(), "TgWsProxy"), "proxy.log");
-                  String contents;
-                  if (!logFile.isFile()) {
-                      contents = "Файл логов не найден: " + logFile.getAbsolutePath()
-                          + "\\nЗапустите прокси и повторите попытку.";
-                  } else {
-                      try (RandomAccessFile f = new RandomAccessFile(logFile, "r")) {
-                          long length = f.length();
-                          long start = Math.max(0, length - 120000);
-                          f.seek(start);
-                          byte[] bytes = new byte[(int)(length - start)];
-                          f.readFully(bytes);
-                          contents = "TG WS Proxy diagnostics (last " + bytes.length + " bytes)\\n"
-                              + new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
-                          if (start > 0) contents = "[Начало файла обрезано; показан конец лога]\\n" + contents;
-                      } catch (IOException e) {
-                          contents = "Не удалось прочитать лог: " + e;
+          # The Chaquopy Python HOME may be a subdirectory under filesDir; search for the actual log.
+          s = s.replace(
+              'File logFile = new File(new File(getFilesDir(), "TgWsProxy"), "proxy.log");',
+              'File logFile = findProxyLog(getFilesDir());'
+          )
+          s = s.replace(
+              'contents = "Файл логов не найден: " + logFile.getAbsolutePath()',
+              'contents = "Файл proxy.log не найден в каталоге приложения: " + getFilesDir().getAbsolutePath()'
+          )
+          marker = "    private void shareLogs() {"
+          helper = r"""
+              private File findProxyLog(File root) {
+                  File expected = new File(new File(root, "TgWsProxy"), "proxy.log");
+                  if (expected.isFile() && expected.length() > 0) return expected;
+                  File homeCandidate = new File(new File(new File(root, "home"), "TgWsProxy"), "proxy.log");
+                  if (homeCandidate.isFile() && homeCandidate.length() > 0) return homeCandidate;
+                  File[] children = root.listFiles();
+                  if (children != null) {
+                      for (File child : children) {
+                          if (child.isDirectory()) {
+                              File found = findProxyLogRecursive(child, 5);
+                              if (found != null) return found;
+                          }
                       }
                   }
-                  Intent send = new Intent(Intent.ACTION_SEND);
-                  send.setType("text/plain");
-                  send.putExtra(Intent.EXTRA_SUBJECT, "TG WS Proxy — диагностические логи");
-                  send.putExtra(Intent.EXTRA_TEXT, contents);
-                  startActivity(Intent.createChooser(send, "Отправить диагностические логи"));
+                  return expected;
               }
-          '''
-          if "private void shareLogs()" not in s:
-              marker = "    @Override protected void onResume()"
+
+              private File findProxyLogRecursive(File dir, int depth) {
+                  if (depth < 0) return null;
+                  File direct = new File(dir, "proxy.log");
+                  if (direct.isFile() && direct.length() > 0) return direct;
+                  File[] children = dir.listFiles();
+                  if (children == null) return null;
+                  for (File child : children) {
+                      if (child.isDirectory()) {
+                          File found = findProxyLogRecursive(child, depth - 1);
+                          if (found != null) return found;
+                      }
+                  }
+                  return null;
+              }
+
+          """
+          if "private File findProxyLog(File root)" not in s:
               if marker not in s:
-                  raise SystemExit("Cannot locate lifecycle method insertion point")
-              s = s.replace(marker, method + "\n" + marker, 1)
+                  raise SystemExit("Cannot locate shareLogs() method")
+              s = s.replace(marker, helper + marker, 1)
           p.write_text(s)
-          print("Diagnostics export button inserted.")
+          print("Updated log discovery in", p)
           PY
-          grep -n "Поделиться логами\|private void shareLogs" app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java
+          grep -n "findProxyLog\|Файл proxy.log не найден" app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java
 
       - uses: actions/setup-java@v4
         with:
