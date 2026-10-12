@@ -30,6 +30,46 @@ jobs:
           cp proxy/tg_ws_proxy.py app/src/main/python/proxy/tg_ws_proxy.py
           touch app/src/main/python/proxy/__init__.py
 
+      - name: Enable persistent file logging
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path("app/src/main/python/android.py")
+          if not p.exists():
+              raise SystemExit(f"Android Python entrypoint not found: {p}")
+          s = p.read_text()
+          if "from logging.handlers import RotatingFileHandler" not in s:
+              s = s.replace("import logging", "import logging\nfrom logging.handlers import RotatingFileHandler", 1)
+          replacement = '''def setup_logging(verbose: bool = False):
+              _ensure_dirs()
+              root = logging.getLogger()
+              root.setLevel(logging.DEBUG if verbose else logging.INFO)
+              root.handlers.clear()
+              formatter = logging.Formatter(
+                  "%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"
+              )
+              ch = logging.StreamHandler(sys.stdout)
+              ch.setLevel(logging.DEBUG if verbose else logging.INFO)
+              ch.setFormatter(formatter)
+              root.addHandler(ch)
+              fh = RotatingFileHandler(
+                  APP_DIR / "proxy.log", maxBytes=1500000, backupCount=3, encoding="utf-8"
+              )
+              fh.setLevel(logging.DEBUG if verbose else logging.INFO)
+              fh.setFormatter(formatter)
+              root.addHandler(fh)
+              log.info("Log file: %s", APP_DIR / "proxy.log")
+          '''
+          pattern = r"def setup_logging\(verbose: bool = False\):.*?(?=\ndef _run_proxy_thread\()"
+          s2, n = re.subn(pattern, replacement, s, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit("Could not replace setup_logging() safely")
+          p.write_text(s2)
+          print("Persistent logging enabled:", p)
+          PY
+          grep -n "RotatingFileHandler\|Log file:" app/src/main/python/android.py
+
       - name: Add diagnostics export button
         run: |
           python3 - <<'PY'
