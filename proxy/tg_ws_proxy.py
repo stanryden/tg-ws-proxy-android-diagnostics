@@ -16,6 +16,10 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 DEFAULT_PORT = 1080
 log = logging.getLogger('tg-ws-proxy')
+# Very chatty (dozens of lines per second during media transfer): keep it
+# off by default; set this logger to DEBUG to see it.
+_split_log = logging.getLogger('tg-ws-proxy.splitter')
+_split_log.setLevel(logging.INFO)
 
 _TG_RANGES = [
     # 185.76.151.0/24
@@ -434,7 +438,7 @@ class _MsgSplitter:
         self._pending_plain = plain[pos:]
         self._pending_cipher = cipher[pos:]
         if self._pending_plain:
-            log.debug("MTProto splitter buffered incomplete message: %d bytes", len(self._pending_plain))
+            _split_log.debug("MTProto splitter buffered incomplete message: %d bytes", len(self._pending_plain))
         return parts
 
 
@@ -531,8 +535,9 @@ async def _bridge_ws(reader, writer, ws: RawWebSocket, label,
                     await writer.drain()
         except asyncio.CancelledError:
             raise
-        except (ConnectionError, OSError) as e:
-            log.info("[%s] ws->tcp socket ended: %s", label, e)
+        except (asyncio.IncompleteReadError, ConnectionError, OSError) as e:
+            log.info("[%s] ws->tcp socket ended: %s: %s",
+                     label, type(e).__name__, e)
         except Exception:
             log.exception("[%s] ws->tcp failed", label)
 
@@ -653,8 +658,9 @@ async def _tcp_fallback(reader, writer, dst, port, init, label,
         rr, rw = await asyncio.wait_for(
             asyncio.open_connection(dst, port), timeout=10)
     except Exception as exc:
-        log.warning("[%s] TCP fallback connect to %s:%d failed: %s",
-                    label, dst, port, exc)
+        log.warning("[%s] TCP fallback connect to %s:%d failed: %s: %s",
+                    label, dst, port, type(exc).__name__,
+                    str(exc) or "(no message / timeout)")
         return False
 
     _stats.connections_tcp_fallback += 1
@@ -760,10 +766,18 @@ async def _handle_client(reader, writer):
         # -- Extract DC ID --
         dc, is_media = _dc_from_init(init)
         init_patched = False
-        
-        # Android (may be ios too) with useSecret=0 has random dc_id bytes — patch it
-        if dc is None and dst in _IP_TO_DC:
-            dc, is_media = _IP_TO_DC.get(dst)
+
+        # Android (may be ios too) with useSecret=0 has random dc_id bytes.
+        # A random value falls into the "valid" 1..1000 range in ~3% of
+        # connections (seen in logs as e.g. "unknown DC378 for a DC2 IP"),
+        # so for known Telegram IPs trust the IP -> DC table whenever the
+        # decoded DC is missing or disagrees with it, and patch the init.
+        ip_dc = _IP_TO_DC.get(dst)
+        if ip_dc is not None and (dc is None or dc != ip_dc[0]):
+            if dc is not None:
+                log.debug("[%s] init DC%s disagrees with %s -> DC%s, "
+                          "using IP mapping", label, dc, dst, ip_dc[0])
+            dc, is_media = ip_dc
             if dc in _dc_opt:
                 init = _patch_init_dc(init, dc if is_media else -dc)
                 init_patched = True
@@ -895,7 +909,7 @@ async def _handle_client(reader, writer):
     except ConnectionResetError:
         log.debug("[%s] connection reset", label)
     except Exception as exc:
-        log.error("[%s] unexpected: %s", label, exc)
+        log.error("[%s] unexpected: %s", label, exc, exc_info=True)
     finally:
         try:
             writer.close()
@@ -983,40 +997,3 @@ def run_proxy(port: int, dc_opt: Dict[int, str],
               host: str = '127.0.0.1'):
     """Run the proxy (blocking). Can be called from threads."""
     asyncio.run(_run(port, dc_opt, stop_event, host))
-
-
-def main():
-    ap = argparse.ArgumentParser(
-        description='Telegram Desktop WebSocket Bridge Proxy')
-    ap.add_argument('--port', type=int, default=DEFAULT_PORT,
-                    help=f'Listen port (default {DEFAULT_PORT})')
-    ap.add_argument('--host', type=str, default='127.0.0.1',
-                    help='Listen host (default 127.0.0.1)')
-    ap.add_argument('--dc-ip', metavar='DC:IP', action='append',
-                    default=['2:149.154.167.220', '4:149.154.167.220'],
-                    help='Target IP for a DC, e.g. --dc-ip 1:149.154.175.205'
-                         ' --dc-ip 2:149.154.167.220')
-    ap.add_argument('-v', '--verbose', action='store_true',
-                    help='Debug logging')
-    args = ap.parse_args()
-
-    try:
-        dc_opt = parse_dc_ip_list(args.dc_ip)
-    except ValueError as e:
-        log.error(str(e))
-        sys.exit(1)
-
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format='%(asctime)s  %(levelname)-5s  %(message)s',
-        datefmt='%H:%M:%S',
-    )
-
-    try:
-        asyncio.run(_run(args.port, dc_opt, host=args.host))
-    except KeyboardInterrupt:
-        log.info("Shutting down. Final stats: %s", _stats.summary())
-
-
-if __name__ == '__main__':
-    main()
