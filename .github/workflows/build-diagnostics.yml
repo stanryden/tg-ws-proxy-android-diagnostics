@@ -149,7 +149,7 @@ jobs:
               s = s[:match.start()] + helper + "\n\n" + s[match.start():]
               match = re.search(r"(?m)^(?P<indent>[ \t]*)def start_proxy\([^)]*\)(?:\s*->\s*[^:]+)?:", s)
               body_start = match.end()
-              s = s[:body_start] + "\n" + match.group("indent") + "    _setup_proxy_file_logging()" + s[body_start:]
+              s = s[:body_start] + "\n" + match.group("indent") + "    try:\n        _setup_proxy_file_logging()\n    except Exception as exc:\n        print(f'Failed to initialize proxy file logging: {exc}', file=sys.stderr)\n" + s[body_start:]
               p.write_text(s)
           print("Patched active Android bridge logging in", p)
           PY
