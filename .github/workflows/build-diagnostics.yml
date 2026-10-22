@@ -81,7 +81,7 @@ jobs:
               raise SystemExit(f"Could not replace setup_logging() in {p}; inspect scaffold signature")
           # The Android UI calls start_proxy() directly; configure logging once in either mode.
           needle = "    cfg = _config\n"
-          start_block = needle + "    if not _logging_ready:\n        setup_logging(cfg.get(\\"verbose\\", False))\n"
+          start_block = needle + '    if not _logging_ready:\\n        setup_logging(cfg.get("verbose", False))\\n'
           if "if not _logging_ready:" not in s2:
               if needle not in s2:
                   raise SystemExit("Could not find start_proxy() config initialization")
@@ -89,6 +89,60 @@ jobs:
           p.write_text(s2)
           print("Persistent file logging enabled in", p)
           PY
+      - name: Patch active Android bridge logging
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path("app/src/main/python")
+          candidates = list(root.rglob("android_bridge.py")) if root.exists() else []
+          if not candidates:
+              raise SystemExit("android_bridge.py not found in embedded Python sources; refusing to build without patching active entry point")
+          p = candidates[0]
+          s = p.read_text()
+          if "_setup_proxy_file_logging" not in s:
+              imports = ""
+              if "import logging" not in s:
+                  imports += "import logging\n"
+              if "RotatingFileHandler" not in s:
+                  imports += "from logging.handlers import RotatingFileHandler\n"
+              if "from pathlib import Path" not in s:
+                  imports += "from pathlib import Path\n"
+              if imports:
+                  s = imports + s
+              helper = '''
+          _proxy_file_log_ready = False
+
+          def _setup_proxy_file_logging():
+              global _proxy_file_log_ready
+              if _proxy_file_log_ready:
+                  return
+              log_dir = Path.home() / "TgWsProxy"
+              log_dir.mkdir(parents=True, exist_ok=True)
+              root_logger = logging.getLogger()
+              root_logger.setLevel(logging.DEBUG)
+              logging.getLogger("asyncio").setLevel(logging.WARNING)
+              for handler in list(root_logger.handlers):
+                  if isinstance(handler, RotatingFileHandler) and handler.baseFilename.endswith("/proxy.log"):
+                      _proxy_file_log_ready = True
+                      return
+              fh = RotatingFileHandler(log_dir / "proxy.log", maxBytes=1_500_000, backupCount=3, encoding="utf-8")
+              fh.setLevel(logging.DEBUG)
+              fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+              root_logger.addHandler(fh)
+              _proxy_file_log_ready = True
+          '''
+              match = re.search(r"(?m)^[ \t]*def start_proxy\([^)]*\)(?:\s*->\s*[^:]+)?:", s)
+              if not match:
+                  raise SystemExit(f"Could not find start_proxy() in {p}")
+              s = s[:match.start()] + helper + "\n\n" + s[match.start():]
+              match = re.search(r"(?m)^(?P<indent>[ \t]*)def start_proxy\([^)]*\)(?:\s*->\s*[^:]+)?:", s)
+              body_start = match.end()
+              s = s[:body_start] + "\n" + match.group("indent") + "    _setup_proxy_file_logging()" + s[body_start:]
+              p.write_text(s)
+          print("Patched active Android bridge logging in", p)
+          PY
+
       - name: Add persistent diagnostics export UI
         run: |
           mkdir -p app/src/main/python
@@ -140,7 +194,7 @@ jobs:
                       String line;
                       while ((line = reader.readLine()) != null) {
                           contents.append(line).append('\n');
-                          if (contents.length() > 1_800_000) {
+                          if (contents.length() > 200_000) {
                               contents.append("\\n[Обрезано: лог слишком большой для передачи одним сообщением]\\n");
                               break;
                           }
