@@ -110,7 +110,7 @@ jobs:
               if "from pathlib import Path" not in s:
                   imports += "from pathlib import Path\n"
               if imports:
-                  future_match = re.match(r"(?s)(\\s*from __future__ import [^\\n]+\\n)", s)
+                  future_match = re.match(r"(?s)(\s*from __future__ import [^\n]+\n)", s)
                   if future_match:
                       s = future_match.group(1) + imports + s[future_match.end():]
                   else:
