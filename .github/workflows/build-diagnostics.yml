@@ -110,7 +110,7 @@ jobs:
               if "from pathlib import Path" not in s:
                   imports += "from pathlib import Path\n"
               if "import sys" not in s:
-                  imports += "import sys\\n"
+                  imports += "import sys\n"
               if imports:
                   future_match = re.match(r"(?s)(\s*from __future__ import [^\n]+\n)", s)
                   if future_match:
@@ -129,14 +129,14 @@ jobs:
               root_logger = logging.getLogger()
               root_logger.setLevel(logging.DEBUG)
               logging.getLogger("asyncio").setLevel(logging.WARNING)
-              warning_stream = logging.StreamHandler()
-              warning_stream.setLevel(logging.WARNING)
-              warning_stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-              root_logger.addHandler(warning_stream)
               for handler in list(root_logger.handlers):
                   if isinstance(handler, RotatingFileHandler) and handler.baseFilename.endswith("/proxy.log"):
                       _proxy_file_log_ready = True
                       return
+              warning_stream = logging.StreamHandler()
+              warning_stream.setLevel(logging.WARNING)
+              warning_stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+              root_logger.addHandler(warning_stream)
               fh = RotatingFileHandler(log_dir / "proxy.log", maxBytes=1_500_000, backupCount=3, encoding="utf-8")
               fh.setLevel(logging.DEBUG)
               fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
@@ -245,6 +245,19 @@ jobs:
           test "$(grep -c 'Поделиться логами' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java)" -ge 1
           test "$(grep -c 'Intent.ACTION_SEND' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java)" -eq 1
           test "$(grep -c 'RotatingFileHandler' app/src/main/python/android.py)" -ge 2
+
+      - name: Compile-check embedded Python sources
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import py_compile
+          files = sorted(Path("app/src/main/python").rglob("*.py"))
+          if not files:
+              raise SystemExit("No embedded Python sources found")
+          for source in files:
+              py_compile.compile(str(source), doraise=True)
+          print(f"Syntax OK: {len(files)} Python files")
+          PY
 
       - uses: actions/setup-java@v4
         with:
