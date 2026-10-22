@@ -41,11 +41,21 @@ jobs:
           s = p.read_text()
           if "from logging.handlers import RotatingFileHandler" not in s:
               s = s.replace("import logging", "import logging\nfrom logging.handlers import RotatingFileHandler", 1)
+          # Ensure the readiness flag exists even when the upstream scaffold is older.
+          if "_logging_ready = False" not in s:
+              marker = "_config: dict = {}"
+              if marker in s:
+                  s = s.replace(marker, marker + "\\n_logging_ready = False", 1)
+              else:
+                  s = s.replace("log = logging.getLogger", "_logging_ready = False\\n\\nlog = logging.getLogger", 1)
           replacement = '''def setup_logging(verbose: bool = False):
+              global _logging_ready
               _ensure_dirs()
               root = logging.getLogger()
-              root.setLevel(logging.DEBUG if verbose else logging.INFO)
-              root.handlers.clear()
+              root.setLevel(logging.DEBUG)
+              for handler in list(root.handlers):
+                  root.removeHandler(handler)
+                  handler.close()
               formatter = logging.Formatter(
                   "%(asctime)s %(levelname)s %(name)s: %(message)s",
                   datefmt="%Y-%m-%d %H:%M:%S",
@@ -61,18 +71,21 @@ jobs:
               file_handler.setLevel(logging.DEBUG)
               file_handler.setFormatter(formatter)
               root.addHandler(file_handler)
+              _logging_ready = True
               log.info("Persistent diagnostics enabled: %s", APP_DIR / "proxy.log")
           '''
-          pattern = r"def setup_logging\(verbose: bool = False\):.*?(?=\ndef _run_proxy_thread\()"
+          # Accept both annotated and unannotated setup_logging signatures.
+          pattern = r"def setup_logging\\(verbose: bool = False\\)(?:\\s*->\\s*[^:]+)?:.*?(?=\\ndef _run_proxy_thread\\()"
           s2, n = re.subn(pattern, lambda _m: replacement, s, count=1, flags=re.S)
           if n != 1:
-              raise SystemExit(f"Could not replace setup_logging() in {p}")
-          # The Android UI calls start_proxy() directly; main() is not entered in embedded mode.
-          needle = "    cfg = _config\n"
-          if "setup_logging(_config.get(\"verbose\", False))" not in s2:
+              raise SystemExit(f"Could not replace setup_logging() in {p}; inspect scaffold signature")
+          # The Android UI calls start_proxy() directly; configure logging once in either mode.
+          needle = "    cfg = _config\\n"
+          start_block = needle + "    if not _logging_ready:\\n        setup_logging(cfg.get(\\"verbose\\", False))\\n"
+          if "if not _logging_ready:" not in s2:
               if needle not in s2:
                   raise SystemExit("Could not find start_proxy() config initialization")
-              s2 = s2.replace(needle, needle + "    setup_logging(_config.get(\"verbose\", False))\n", 1)
+              s2 = s2.replace(needle, start_block, 1)
           p.write_text(s2)
           print("Persistent file logging enabled in", p)
           PY
