@@ -30,6 +30,30 @@ jobs:
           cp proxy/tg_ws_proxy.py app/src/main/python/proxy/tg_ws_proxy.py
           touch app/src/main/python/proxy/__init__.py
 
+      - name: Install launcher icon
+        run: |
+          python3 - <<'PY'
+          import base64
+          from pathlib import Path
+          encoded = Path("assets/ic_launcher.jpg.b64").read_text().strip()
+          image = base64.b64decode(encoded, validate=True)
+          if not image.startswith(bytes.fromhex("ffd8ff")):
+              raise SystemExit("Launcher icon source is not a valid JPEG")
+          # Android accepts JPEG launcher resources. Provide each density bucket.
+          res = Path("app/src/main/res")
+          for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"):
+              target = res / f"mipmap-{density}" / "ic_launcher.jpg"
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(image)
+          manifest = Path("app/src/main/AndroidManifest.xml")
+          if manifest.exists():
+              text = manifest.read_text()
+              if 'android:icon="@mipmap/ic_launcher"' not in text:
+                  text = text.replace('android:icon="@mipmap/ic_launcher_round"', 'android:icon="@mipmap/ic_launcher"')
+                  manifest.write_text(text)
+          print("Installed launcher icon in all mipmap density buckets")
+          PY
+
       - name: Enable persistent file logging
         run: |
           python3 - <<'PY'
