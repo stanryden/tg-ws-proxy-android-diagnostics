@@ -42,8 +42,12 @@ jobs:
           # Android accepts JPEG launcher resources. Provide each density bucket.
           res = Path("app/src/main/res")
           for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"):
-              target = res / f"mipmap-{density}" / "ic_launcher.jpg"
-              target.parent.mkdir(parents=True, exist_ok=True)
+              folder = res / f"mipmap-{density}"
+              folder.mkdir(parents=True, exist_ok=True)
+              # Avoid duplicate Android resources with the same name but different extensions.
+              for previous in folder.glob("ic_launcher.*"):
+                  previous.unlink()
+              target = folder / "ic_launcher.jpg"
               target.write_bytes(image)
           manifest = Path("app/src/main/AndroidManifest.xml")
           if manifest.exists():
