@@ -127,6 +127,10 @@ jobs:
               root_logger = logging.getLogger()
               root_logger.setLevel(logging.DEBUG)
               logging.getLogger("asyncio").setLevel(logging.WARNING)
+              warning_stream = logging.StreamHandler()
+              warning_stream.setLevel(logging.WARNING)
+              warning_stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+              root_logger.addHandler(warning_stream)
               for handler in list(root_logger.handlers):
                   if isinstance(handler, RotatingFileHandler) and handler.baseFilename.endswith("/proxy.log"):
                       _proxy_file_log_ready = True
@@ -184,6 +188,23 @@ jobs:
                   return null;
               }
 
+              private String readTail(File f, int maxBytes) throws java.io.IOException {
+                  try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r")) {
+                      long len = raf.length();
+                      long start = Math.max(0, len - maxBytes);
+                      raf.seek(start);
+                      byte[] buf = new byte[(int) (len - start)];
+                      raf.readFully(buf);
+                      String result = new String(buf, StandardCharsets.UTF_8);
+                      if (start > 0) {
+                          int nl = result.indexOf('\n');
+                          if (nl >= 0) result = result.substring(nl + 1);
+                          result = "[Показан только хвост лога]\n" + result;
+                      }
+                      return result;
+                  }
+              }
+
               private void shareLogs() {
                   File logFile = findProxyLog(getFilesDir(), 8);
                   if (logFile == null || !logFile.isFile()) {
@@ -193,17 +214,9 @@ jobs:
                           .setPositiveButton("ОК", null).show();
                       return;
                   }
-                  StringBuilder contents = new StringBuilder();
-                  try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                          new FileInputStream(logFile), StandardCharsets.UTF_8))) {
-                      String line;
-                      while ((line = reader.readLine()) != null) {
-                          contents.append(line).append('\n');
-                          if (contents.length() > 200_000) {
-                              contents.append("\n[Обрезано: передан только хвост лога]\n");
-                              break;
-                          }
-                      }
+                  String contents;
+                  try {
+                      contents = readTail(logFile, 150_000);
                   } catch (Exception e) {
                       new android.app.AlertDialog.Builder(this)
                           .setTitle("Не удалось прочитать лог")
