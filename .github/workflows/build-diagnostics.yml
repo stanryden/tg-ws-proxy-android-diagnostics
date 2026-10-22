@@ -109,6 +109,8 @@ jobs:
                   imports += "from logging.handlers import RotatingFileHandler\n"
               if "from pathlib import Path" not in s:
                   imports += "from pathlib import Path\n"
+              if "import sys" not in s:
+                  imports += "import sys\\n"
               if imports:
                   future_match = re.match(r"(?s)(\s*from __future__ import [^\n]+\n)", s)
                   if future_match:
