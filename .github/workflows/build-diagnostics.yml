@@ -81,7 +81,7 @@ jobs:
               raise SystemExit(f"Could not replace setup_logging() in {p}; inspect scaffold signature")
           # The Android UI calls start_proxy() directly; configure logging once in either mode.
           needle = "    cfg = _config\n"
-          start_block = needle + '    if not _logging_ready:\\n        setup_logging(cfg.get("verbose", False))\\n'
+          start_block = needle + "    if not _logging_ready:" + chr(10) + '        setup_logging(cfg.get("verbose", False))' + chr(10)
           if "if not _logging_ready:" not in s2:
               if needle not in s2:
                   raise SystemExit("Could not find start_proxy() config initialization")
@@ -94,6 +94,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
+          import textwrap
           root = Path("app/src/main/python")
           candidates = list(root.rglob("android_bridge.py")) if root.exists() else []
           if not candidates:
@@ -110,7 +111,7 @@ jobs:
                   imports += "from pathlib import Path\n"
               if imports:
                   s = imports + s
-              helper = '''
+              helper = textwrap.dedent('''
           _proxy_file_log_ready = False
 
           def _setup_proxy_file_logging():
@@ -195,7 +196,7 @@ jobs:
                       while ((line = reader.readLine()) != null) {
                           contents.append(line).append('\n');
                           if (contents.length() > 200_000) {
-                              contents.append("\\n[Обрезано: лог слишком большой для передачи одним сообщением]\\n");
+                              contents.append("\n[Обрезано: передан только хвост лога]\n");
                               break;
                           }
                       }
@@ -209,7 +210,7 @@ jobs:
                   Intent send = new Intent(Intent.ACTION_SEND);
                   send.setType("text/plain");
                   send.putExtra(Intent.EXTRA_SUBJECT, "TG WS Proxy — proxy.log");
-                  send.putExtra(Intent.EXTRA_TEXT, "Файл: " + logFile.getAbsolutePath() + "\\n\\n" + contents);
+                  send.putExtra(Intent.EXTRA_TEXT, "Файл: " + logFile.getAbsolutePath() + "\n\n" + contents);
                   startActivity(Intent.createChooser(send, "Поделиться логами прокси"));
               }
 
