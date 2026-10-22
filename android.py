@@ -58,7 +58,7 @@ def load_config() -> dict:
     return copy.deepcopy(DEFAULT_CONFIG)
 
 
-def setup_logging(verbose: bool = False) -> None:
+def setup_logging(verbose: bool = False):
     global _logging_ready
     _ensure_dirs()
     root = logging.getLogger()
