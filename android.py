@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
 _proxy_thread: Optional[threading.Thread] = None
 _async_stop: Optional[Tuple[_asyncio.AbstractEventLoop, _asyncio.Event]] = None
 _config: dict = {}
+_logging_ready = False
 
 log = logging.getLogger("tg-ws-android")
 
@@ -58,6 +59,7 @@ def load_config() -> dict:
 
 
 def setup_logging(verbose: bool = False) -> None:
+    global _logging_ready
     _ensure_dirs()
     root = logging.getLogger()
     # Root must pass DEBUG so the file handler can record it even when the
@@ -87,6 +89,7 @@ def setup_logging(verbose: bool = False) -> None:
     file_handler.setFormatter(fmt)
     root.addHandler(file_handler)
 
+    _logging_ready = True
     log.info("Persistent diagnostics enabled: %s", log_path)
 
 
@@ -134,6 +137,10 @@ def start_proxy() -> bool:
         return True
 
     cfg = _config
+    # Embedded (Android UI) mode calls start_proxy() directly and never
+    # enters main(), so make sure logging is configured exactly once.
+    if not _logging_ready:
+        setup_logging(cfg.get("verbose", False))
     port = int(cfg.get("port", DEFAULT_CONFIG["port"]))
     host = cfg.get("host", DEFAULT_CONFIG["host"])
     dc_ip_list = cfg.get("dc_ip", DEFAULT_CONFIG["dc_ip"])
