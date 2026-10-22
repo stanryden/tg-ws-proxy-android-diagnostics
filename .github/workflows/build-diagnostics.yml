@@ -45,9 +45,9 @@ jobs:
           if "_logging_ready = False" not in s:
               marker = "_config: dict = {}"
               if marker in s:
-                  s = s.replace(marker, marker + "\\n_logging_ready = False", 1)
+                  s = s.replace(marker, marker + "\n_logging_ready = False", 1)
               else:
-                  s = s.replace("log = logging.getLogger", "_logging_ready = False\\n\\nlog = logging.getLogger", 1)
+                  s = s.replace("log = logging.getLogger", "_logging_ready = False\n\nlog = logging.getLogger", 1)
           replacement = '''def setup_logging(verbose: bool = False):
               global _logging_ready
               _ensure_dirs()
@@ -75,13 +75,13 @@ jobs:
               log.info("Persistent diagnostics enabled: %s", APP_DIR / "proxy.log")
           '''
           # Accept both annotated and unannotated setup_logging signatures.
-          pattern = r"def setup_logging\\(verbose: bool = False\\)(?:\\s*->\\s*[^:]+)?:.*?(?=\\ndef _run_proxy_thread\\()"
+          pattern = r"def setup_logging\(verbose: bool = False\)(?:\s*->\s*[^:]+)?:.*?(?=\ndef _run_proxy_thread\()"
           s2, n = re.subn(pattern, lambda _m: replacement, s, count=1, flags=re.S)
           if n != 1:
               raise SystemExit(f"Could not replace setup_logging() in {p}; inspect scaffold signature")
           # The Android UI calls start_proxy() directly; configure logging once in either mode.
-          needle = "    cfg = _config\\n"
-          start_block = needle + "    if not _logging_ready:\\n        setup_logging(cfg.get(\\"verbose\\", False))\\n"
+          needle = "    cfg = _config\n"
+          start_block = needle + "    if not _logging_ready:\n        setup_logging(cfg.get(\\"verbose\\", False))\n"
           if "if not _logging_ready:" not in s2:
               if needle not in s2:
                   raise SystemExit("Could not find start_proxy() config initialization")
