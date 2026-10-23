@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import hmac
+import ipaddress
 import logging
 import os
 import socket as _socket
@@ -78,9 +80,90 @@ _dc_fail_until: Dict[Tuple[int, bool], float] = {}
 _DC_FAIL_COOLDOWN = 60.0  # seconds
 
 
-_ssl_ctx = ssl.create_default_context()
-_ssl_ctx.check_hostname = False
-_ssl_ctx.verify_mode = ssl.CERT_NONE
+def _make_ssl_ctx(verify: bool) -> ssl.SSLContext:
+    """TLS context for the WebSocket link to Telegram's kws* endpoints.
+
+    Certificate and hostname verification are ON by default.  Switching
+    them off (verify=False) lets anyone on the network path impersonate
+    the relay, so it is meant for debugging only.
+    """
+    ctx = ssl.create_default_context()
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+_ssl_ctx = _make_ssl_ctx(True)
+
+# --- Access control -------------------------------------------------------
+# SOCKS5 username/password (RFC 1929) as bytes, or None = no authentication
+# (only allowed on a loopback listener, see _run()).
+_auth: Optional[Tuple[bytes, bytes]] = None
+
+# Limit what the proxy will connect to besides Telegram DCs.
+_strict_destinations = True
+_ALLOWED_PORTS = (80, 443, 5222)
+_TG_V6_NETS = [ipaddress.ip_network(n) for n in (
+    '2001:b28:f23d::/48', '2001:b28:f23f::/48', '2001:b28:f23c::/48',
+    '2001:67c:4e8::/48', '2a0a:f280::/32')]
+_TG_EXTRA_V4_NETS = [ipaddress.ip_network('95.161.64.0/20')]
+_TG_DOMAIN_SUFFIXES = ('telegram.org', 't.me', 'telegram.me',
+                       'telesco.pe', 'telegra.ph')
+
+# Cap on simultaneously handled client connections.
+_MAX_CLIENTS = 256
+_active_clients = 0
+
+
+def _ip_obj(host: str):
+    try:
+        ip = ipaddress.ip_address(host.split('%', 1)[0])
+    except ValueError:
+        return None
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
+
+
+def _is_forbidden_ip(ip) -> bool:
+    """Loopback, private, link-local, multicast, reserved...: never allowed."""
+    return (not ip.is_global) or ip.is_multicast
+
+
+def _passthrough_denied(dst: str, port: int) -> Optional[str]:
+    """Return a reason if a non-Telegram-DC destination must be refused."""
+    ip = _ip_obj(dst)
+    if ip is not None:
+        if _is_forbidden_ip(ip):
+            return "private/loopback/link-local address"
+        if _strict_destinations:
+            nets = _TG_V6_NETS if ip.version == 6 else _TG_EXTRA_V4_NETS
+            if not any(ip in n for n in nets):
+                return "not a Telegram address"
+    elif _strict_destinations:
+        host = dst.lower().rstrip('.')
+        if not any(host == sfx or host.endswith('.' + sfx)
+                   for sfx in _TG_DOMAIN_SUFFIXES):
+            return "not a Telegram domain"
+    if _strict_destinations and port not in _ALLOWED_PORTS:
+        return f"port {port} not allowed"
+    return None
+
+
+async def _resolve_public(host: str, port: int) -> str:
+    """Resolve a domain and return a public address (never a private one)."""
+    infos = await asyncio.get_running_loop().getaddrinfo(
+        host, port, type=_socket.SOCK_STREAM)
+    cands = []
+    for info in infos:
+        ip = _ip_obj(info[4][0])
+        if ip is not None and not _is_forbidden_ip(ip):
+            cands.append((ip.version, info[4][0]))
+    if not cands:
+        raise OSError("all resolved addresses are private or forbidden")
+    cands.sort()  # prefer IPv4 (many mobile networks have no IPv6)
+    return cands[0][1]
 
 
 class WsHandshakeError(Exception):
@@ -354,8 +437,7 @@ def _dc_from_init(data: bytes) -> Tuple[Optional[int], bool]:
         plain = bytes(a ^ b for a, b in zip(data[56:64], keystream[56:64]))
         proto = struct.unpack('<I', plain[0:4])[0]
         dc_raw = struct.unpack('<h', plain[4:6])[0]
-        log.debug("dc_from_init: proto=0x%08X dc_raw=%d plain=%s",
-                  proto, dc_raw, plain.hex())
+        log.debug("dc_from_init: proto=0x%08X dc_raw=%d", proto, dc_raw)
         if proto in (0xEFEFEFEF, 0xEEEEEEEE, 0xDDDDDDDD):
             dc = abs(dc_raw)
             if 1 <= dc <= 1000:
@@ -462,6 +544,7 @@ class Stats:
         self.connections_tcp_fallback = 0
         self.connections_http_rejected = 0
         self.connections_passthrough = 0
+        self.connections_blocked = 0
         self.ws_errors = 0
         self.bytes_up = 0
         self.bytes_down = 0
@@ -471,6 +554,7 @@ class Stats:
                 f"tcp_fb={self.connections_tcp_fallback} "
                 f"http_skip={self.connections_http_rejected} "
                 f"pass={self.connections_passthrough} "
+                f"blocked={self.connections_blocked} "
                 f"err={self.ws_errors} "
                 f"up={_human_bytes(self.bytes_up)} "
                 f"down={_human_bytes(self.bytes_down)}")
@@ -648,6 +732,27 @@ def _socks5_reply(status):
     return bytes([0x05, status, 0x00, 0x01]) + b'\x00' * 6
 
 
+async def _socks5_check_auth(reader, writer, label) -> bool:
+    """RFC 1929 username/password sub-negotiation. True if accepted."""
+    async def rd(n):
+        return await asyncio.wait_for(reader.readexactly(n), timeout=10)
+
+    ver = (await rd(1))[0]
+    user = await rd((await rd(1))[0])
+    pw = await rd((await rd(1))[0])
+    exp_user, exp_pw = _auth
+    # '&' (not 'and') so that both comparisons always run
+    ok = (ver == 1) & hmac.compare_digest(user, exp_user) \
+        & hmac.compare_digest(pw, exp_pw)
+    if not ok:
+        await asyncio.sleep(1.0)  # slow down guessing
+    writer.write(b'\x01\x00' if ok else b'\x01\x01')
+    await writer.drain()
+    if not ok:
+        log.warning("[%s] SOCKS5 authentication failed", label)
+    return bool(ok)
+
+
 async def _tcp_fallback(reader, writer, dst, port, init, label,
                         dc=None, is_media=False):
     """
@@ -671,7 +776,7 @@ async def _tcp_fallback(reader, writer, dst, port, init, label,
     return True
 
 
-async def _handle_client(reader, writer):
+async def _handle_client_inner(reader, writer):
     _stats.connections_total += 1
     peer = writer.get_extra_info('peername')
     label = f"{peer[0]}:{peer[1]}" if peer else "?"
@@ -684,9 +789,24 @@ async def _handle_client(reader, writer):
             writer.close()
             return
         nmethods = hdr[1]
-        await reader.readexactly(nmethods)
-        writer.write(b'\x05\x00')  # no-auth
-        await writer.drain()
+        methods = await asyncio.wait_for(
+            reader.readexactly(nmethods), timeout=10)
+        if _auth is not None:
+            if 0x02 not in methods:
+                writer.write(b'\x05\xff')  # no acceptable method
+                await writer.drain()
+                log.warning("[%s] client did not offer username/password "
+                            "authentication", label)
+                writer.close()
+                return
+            writer.write(b'\x05\x02')
+            await writer.drain()
+            if not await _socks5_check_auth(reader, writer, label):
+                writer.close()
+                return
+        else:
+            writer.write(b'\x05\x00')  # no-auth
+            await writer.drain()
 
         # -- SOCKS5 CONNECT request --
         req = await asyncio.wait_for(reader.readexactly(4), timeout=10)
@@ -716,11 +836,24 @@ async def _handle_client(reader, writer):
 
         # -- Non-Telegram IP -> direct passthrough --
         if not _is_telegram_ip(dst):
+            denied = _passthrough_denied(dst, port)
+            if denied:
+                _stats.connections_blocked += 1
+                log.warning("[%s] blocked destination %s:%d (%s)",
+                            label, dst, port, denied)
+                writer.write(_socks5_reply(0x02))  # not allowed by ruleset
+                await writer.drain()
+                writer.close()
+                return
             _stats.connections_passthrough += 1
             log.debug("[%s] passthrough -> %s:%d", label, dst, port)
             try:
+                target = dst
+                if _ip_obj(dst) is None:  # domain: resolve, reject private
+                    target = await asyncio.wait_for(
+                        _resolve_public(dst, port), timeout=10)
                 rr, rw = await asyncio.wait_for(
-                    asyncio.open_connection(dst, port), timeout=10)
+                    asyncio.open_connection(target, port), timeout=10)
             except Exception as exc:
                 log.warning("[%s] passthrough failed to %s: %s: %s", label, dst, type(exc).__name__, str(exc) or "(no message)")
                 writer.write(_socks5_reply(0x05))
@@ -852,8 +985,10 @@ async def _handle_client(reader, writer):
                 err_str = str(exc)
                 if ('CERTIFICATE_VERIFY_FAILED' in err_str or
                         'Hostname mismatch' in err_str):
-                    log.warning("[%s] DC%d%s SSL error: %s",
-                                label, dc, media_tag, exc)
+                    log.warning("[%s] DC%d%s SSL error: %s (certificate "
+                                "verification is %s)", label, dc, media_tag,
+                                exc, "ON" if _ssl_ctx.verify_mode !=
+                                ssl.CERT_NONE else "OFF")
                 else:
                     log.warning("[%s] DC%d%s WS connect failed: %s",
                                 label, dc, media_tag, exc)
@@ -917,16 +1052,44 @@ async def _handle_client(reader, writer):
             pass
 
 
+async def _handle_client(reader, writer):
+    """Connection cap around the real handler."""
+    global _active_clients
+    if _active_clients >= _MAX_CLIENTS:
+        log.warning("too many connections (%d), refusing a new one",
+                    _active_clients)
+        try:
+            writer.close()
+        except Exception:
+            pass
+        return
+    _active_clients += 1
+    try:
+        await _handle_client_inner(reader, writer)
+    finally:
+        _active_clients -= 1
+
+
 _server_instance = None
 _server_stop_event = None
 
 
 async def _run(port: int, dc_opt: Dict[int, Optional[str]],
                stop_event: Optional[asyncio.Event] = None,
-               host: str = '127.0.0.1'):
+               host: str = '127.0.0.1',
+               auth: Optional[Tuple[str, str]] = None,
+               verify_tls: bool = True,
+               strict_destinations: bool = True):
     global _dc_opt, _server_instance, _server_stop_event
+    global _auth, _ssl_ctx, _strict_destinations
+    if auth is None and host not in ('127.0.0.1', 'localhost', '::1'):
+        raise ValueError("refusing to listen on a non-loopback address "
+                         "without SOCKS5 authentication")
     _dc_opt = dc_opt
     _server_stop_event = stop_event
+    _auth = (auth[0].encode('utf-8'), auth[1].encode('utf-8')) if auth else None
+    _ssl_ctx = _make_ssl_ctx(verify_tls)
+    _strict_destinations = strict_destinations
 
     server = await asyncio.start_server(
         _handle_client, host, port)
@@ -940,8 +1103,14 @@ async def _run(port: int, dc_opt: Dict[int, Optional[str]],
         ip = dc_opt.get(dc)
         log.info("    DC%d: %s", dc, ip)
     log.info("=" * 60)
-    log.info("  Configure Telegram Desktop:")
-    log.info("    SOCKS5 proxy -> %s:%d  (no user/pass)", host, port)
+    log.info("  SOCKS5 auth: %s | TLS verification: %s | "
+             "destination filter: %s",
+             "ON" if _auth else "OFF",
+             "ON" if verify_tls else "OFF (INSECURE)",
+             "strict" if strict_destinations else "private ranges only")
+    log.info("  Configure Telegram:")
+    log.info("    SOCKS5 proxy -> %s:%d  (%s)", host, port,
+             "username/password required" if _auth else "no user/pass")
     log.info("=" * 60)
 
     async def log_stats():
@@ -994,6 +1163,63 @@ def parse_dc_ip_list(dc_ip_list: List[str]) -> Dict[int, str]:
 
 def run_proxy(port: int, dc_opt: Dict[int, str],
               stop_event: Optional[asyncio.Event] = None,
-              host: str = '127.0.0.1'):
-    """Run the proxy (blocking). Can be called from threads."""
-    asyncio.run(_run(port, dc_opt, stop_event, host))
+              host: str = '127.0.0.1', **kwargs):
+    """Run the proxy (blocking). Can be called from threads.
+
+    Extra keyword arguments (auth, verify_tls, strict_destinations) are
+    passed to _run().
+    """
+    asyncio.run(_run(port, dc_opt, stop_event, host, **kwargs))
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description='Telegram Desktop WebSocket Bridge Proxy')
+    ap.add_argument('--port', type=int, default=DEFAULT_PORT,
+                    help=f'Listen port (default {DEFAULT_PORT})')
+    ap.add_argument('--host', type=str, default='127.0.0.1',
+                    help='Listen host (default 127.0.0.1)')
+    ap.add_argument('--dc-ip', metavar='DC:IP', action='append',
+                    default=['2:149.154.167.220', '4:149.154.167.220'],
+                    help='Target IP for a DC, e.g. --dc-ip 1:149.154.175.205'
+                         ' --dc-ip 2:149.154.167.220')
+    ap.add_argument('-v', '--verbose', action='store_true',
+                    help='Debug logging')
+    ap.add_argument('--auth', metavar='USER:PASS',
+                    help='Require SOCKS5 username/password '
+                         '(mandatory when --host is not loopback)')
+    ap.add_argument('--insecure-tls', action='store_true',
+                    help='Disable TLS certificate verification (debug only)')
+    ap.add_argument('--allow-any-dest', action='store_true',
+                    help='Allow any public destination, not only Telegram')
+    args = ap.parse_args()
+
+    try:
+        dc_opt = parse_dc_ip_list(args.dc_ip)
+    except ValueError as e:
+        log.error(str(e))
+        sys.exit(1)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format='%(asctime)s  %(levelname)-5s  %(message)s',
+        datefmt='%H:%M:%S',
+    )
+
+    auth = None
+    if args.auth:
+        if ':' not in args.auth:
+            log.error("--auth must look like USER:PASS")
+            sys.exit(1)
+        auth = tuple(args.auth.split(':', 1))
+
+    try:
+        asyncio.run(_run(args.port, dc_opt, host=args.host, auth=auth,
+                         verify_tls=not args.insecure_tls,
+                         strict_destinations=not args.allow_any_dest))
+    except KeyboardInterrupt:
+        log.info("Shutting down. Final stats: %s", _stats.summary())
+
+
+if __name__ == '__main__':
+    main()
