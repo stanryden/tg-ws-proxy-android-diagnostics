@@ -15,6 +15,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download Android scaffold
+        # Tip: replace "main" in the URL with a commit SHA of the scaffold
+        # repository so that builds are reproducible.
         run: |
           curl -fL --retry 3 \
             https://raw.githubusercontent.com/stanryden/tg-ws-proxy-android/main/tg-ws-proxy-android-source-replacement.zip \
@@ -29,6 +31,23 @@ jobs:
           mkdir -p app/src/main/python/proxy
           cp proxy/tg_ws_proxy.py app/src/main/python/proxy/tg_ws_proxy.py
           touch app/src/main/python/proxy/__init__.py
+
+      - name: Apply app overlay (Android bridge and UI)
+        run: |
+          set -euo pipefail
+          test -f overlay/android_bridge.py
+          test -f overlay/MainActivity.java
+          BRIDGE="$(find app/src/main/python -name android_bridge.py | head -n 1)"
+          MAIN="$(find app/src/main/java -name MainActivity.java | head -n 1)"
+          test -n "$BRIDGE" || { echo "scaffold has no android_bridge.py"; exit 1; }
+          test -n "$MAIN" || { echo "scaffold has no MainActivity.java"; exit 1; }
+          cp overlay/android_bridge.py "$BRIDGE"
+          cp overlay/MainActivity.java "$MAIN"
+          echo "Overlay applied: $BRIDGE, $MAIN"
+          # The bridge and the UI must be updated together.
+          grep -q "def get_connection_info" "$BRIDGE"
+          grep -q "get_connection_info" "$MAIN"
+          grep -q "_setup_proxy_file_logging" "$BRIDGE"
 
       - name: Install launcher icon
         run: |
@@ -57,222 +76,6 @@ jobs:
                   manifest.write_text(text)
           print("Installed launcher icon in all mipmap density buckets")
           PY
-
-      - name: Enable persistent file logging
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          p = Path("android.py")
-          if not p.is_file():
-              raise SystemExit("Expected root android.py was not found after scaffold extraction")
-          s = p.read_text()
-          if "from logging.handlers import RotatingFileHandler" not in s:
-              s = s.replace("import logging", "import logging\nfrom logging.handlers import RotatingFileHandler", 1)
-          # Ensure the readiness flag exists even when the upstream scaffold is older.
-          if "_logging_ready = False" not in s:
-              marker = "_config: dict = {}"
-              if marker in s:
-                  s = s.replace(marker, marker + "\n_logging_ready = False", 1)
-              else:
-                  s = s.replace("log = logging.getLogger", "_logging_ready = False\n\nlog = logging.getLogger", 1)
-          replacement = '''def setup_logging(verbose: bool = False):
-              global _logging_ready
-              _ensure_dirs()
-              root = logging.getLogger()
-              root.setLevel(logging.DEBUG)
-              for handler in list(root.handlers):
-                  root.removeHandler(handler)
-                  handler.close()
-              formatter = logging.Formatter(
-                  "%(asctime)s %(levelname)s %(name)s: %(message)s",
-                  datefmt="%Y-%m-%d %H:%M:%S",
-              )
-              level = logging.DEBUG if verbose else logging.INFO
-              console = logging.StreamHandler(sys.stdout)
-              console.setLevel(level)
-              console.setFormatter(formatter)
-              root.addHandler(console)
-              file_handler = RotatingFileHandler(
-                  APP_DIR / "proxy.log", maxBytes=1500000, backupCount=3, encoding="utf-8"
-              )
-              file_handler.setLevel(logging.DEBUG)
-              file_handler.setFormatter(formatter)
-              root.addHandler(file_handler)
-              _logging_ready = True
-              log.info("Persistent diagnostics enabled: %s", APP_DIR / "proxy.log")
-          '''
-          # Accept both annotated and unannotated setup_logging signatures.
-          pattern = r"def setup_logging\(verbose: bool = False\)(?:\s*->\s*[^:]+)?:.*?(?=\ndef _run_proxy_thread\()"
-          s2, n = re.subn(pattern, lambda _m: replacement, s, count=1, flags=re.S)
-          if n != 1:
-              raise SystemExit(f"Could not replace setup_logging() in {p}; inspect scaffold signature")
-          # The Android UI calls start_proxy() directly; configure logging once in either mode.
-          needle = "    cfg = _config\n"
-          start_block = needle + "    if not _logging_ready:" + chr(10) + '        setup_logging(cfg.get("verbose", False))' + chr(10)
-          if "if not _logging_ready:" not in s2:
-              if needle not in s2:
-                  raise SystemExit("Could not find start_proxy() config initialization")
-              s2 = s2.replace(needle, start_block, 1)
-          p.write_text(s2)
-          print("Persistent file logging enabled in", p)
-          PY
-      - name: Patch active Android bridge logging
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          import textwrap
-          root = Path("app/src/main/python")
-          candidates = list(root.rglob("android_bridge.py")) if root.exists() else []
-          if not candidates:
-              raise SystemExit("android_bridge.py not found in embedded Python sources; refusing to build without patching active entry point")
-          p = candidates[0]
-          s = p.read_text()
-          if "_setup_proxy_file_logging" not in s:
-              imports = ""
-              if "import logging" not in s:
-                  imports += "import logging\n"
-              if "RotatingFileHandler" not in s:
-                  imports += "from logging.handlers import RotatingFileHandler\n"
-              if "from pathlib import Path" not in s:
-                  imports += "from pathlib import Path\n"
-              if "import sys" not in s:
-                  imports += "import sys\n"
-              if imports:
-                  future_match = re.match(r"(?s)(\s*from __future__ import [^\n]+\n)", s)
-                  if future_match:
-                      s = future_match.group(1) + imports + s[future_match.end():]
-                  else:
-                      s = imports + s
-              helper = textwrap.dedent('''
-          _proxy_file_log_ready = False
-
-          def _setup_proxy_file_logging():
-              global _proxy_file_log_ready
-              if _proxy_file_log_ready:
-                  return
-              log_dir = Path.home() / "TgWsProxy"
-              log_dir.mkdir(parents=True, exist_ok=True)
-              root_logger = logging.getLogger()
-              root_logger.setLevel(logging.DEBUG)
-              logging.getLogger("asyncio").setLevel(logging.WARNING)
-              for handler in list(root_logger.handlers):
-                  if isinstance(handler, RotatingFileHandler) and handler.baseFilename.endswith("/proxy.log"):
-                      _proxy_file_log_ready = True
-                      return
-              warning_stream = logging.StreamHandler()
-              warning_stream.setLevel(logging.WARNING)
-              warning_stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-              root_logger.addHandler(warning_stream)
-              fh = RotatingFileHandler(log_dir / "proxy.log", maxBytes=1_500_000, backupCount=3, encoding="utf-8")
-              fh.setLevel(logging.DEBUG)
-              fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-              root_logger.addHandler(fh)
-              _proxy_file_log_ready = True
-          ''')
-              match = re.search(r"(?m)^[ \t]*def start_proxy\([^)]*\)(?:\s*->\s*[^:]+)?:", s)
-              if not match:
-                  raise SystemExit(f"Could not find start_proxy() in {p}")
-              s = s[:match.start()] + helper + "\n\n" + s[match.start():]
-              match = re.search(r"(?m)^(?P<indent>[ \t]*)def start_proxy\([^)]*\)(?:\s*->\s*[^:]+)?:", s)
-              body_start = match.end()
-              s = s[:body_start] + "\n" + match.group("indent") + "    try:\n        _setup_proxy_file_logging()\n    except Exception as exc:\n        print(f'Failed to initialize proxy file logging: {exc}', file=sys.stderr)\n" + s[body_start:]
-              p.write_text(s)
-          print("Patched active Android bridge logging in", p)
-          PY
-
-      - name: Add persistent diagnostics export UI
-        run: |
-          mkdir -p app/src/main/python
-          cp android.py app/src/main/python/android.py
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java")
-          s = p.read_text()
-          if 'import java.io.File;' not in s:
-              s = s.replace('import android.widget.TextView;\n', 'import android.widget.TextView;\nimport java.io.File;\nimport java.io.BufferedReader;\nimport java.io.FileInputStream;\nimport java.io.InputStreamReader;\nimport java.nio.charset.StandardCharsets;\n')
-          marker = '        TextView note = new TextView(this);'
-          button = '''        Button shareLogs = new Button(this);
-                  shareLogs.setText("Поделиться логами");
-                  shareLogs.setOnClickListener(v -> shareLogs());
-                  layout.addView(shareLogs);
-          '''
-          if 'shareLogs.setText("Поделиться логами")' not in s:
-              if marker not in s: raise SystemExit("Could not locate note insertion point in MainActivity")
-              s = s.replace(marker, button + marker, 1)
-          method_marker = '    @Override protected void onResume()'
-          method = r"""
-              private File findProxyLog(File root, int depth) {
-                  if (root == null || depth < 0 || !root.isDirectory()) return null;
-                  File direct = new File(root, "proxy.log");
-                  if (direct.isFile() && direct.length() > 0) return direct;
-                  File[] children = root.listFiles();
-                  if (children == null) return null;
-                  for (File child : children) {
-                      if (child.isDirectory()) {
-                          File found = findProxyLog(child, depth - 1);
-                          if (found != null) return found;
-                      }
-                  }
-                  return null;
-              }
-
-              private String readTail(File f, int maxBytes) throws java.io.IOException {
-                  try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r")) {
-                      long len = raf.length();
-                      long start = Math.max(0, len - maxBytes);
-                      raf.seek(start);
-                      byte[] buf = new byte[(int) (len - start)];
-                      raf.readFully(buf);
-                      String result = new String(buf, StandardCharsets.UTF_8);
-                      if (start > 0) {
-                          int nl = result.indexOf('\n');
-                          if (nl >= 0) result = result.substring(nl + 1);
-                          result = "[Показан только хвост лога]\n" + result;
-                      }
-                      return result;
-                  }
-              }
-
-              private void shareLogs() {
-                  File logFile = findProxyLog(getFilesDir(), 8);
-                  if (logFile == null || !logFile.isFile()) {
-                      new android.app.AlertDialog.Builder(this)
-                          .setTitle("Логи пока не найдены")
-                          .setMessage("Запусти прокси, подожди несколько секунд и повтори. Если файла всё ещё нет, пришли скриншот этого сообщения.")
-                          .setPositiveButton("ОК", null).show();
-                      return;
-                  }
-                  String contents;
-                  try {
-                      contents = readTail(logFile, 150_000);
-                  } catch (Exception e) {
-                      new android.app.AlertDialog.Builder(this)
-                          .setTitle("Не удалось прочитать лог")
-                          .setMessage(e.toString())
-                          .setPositiveButton("ОК", null).show();
-                      return;
-                  }
-                  Intent send = new Intent(Intent.ACTION_SEND);
-                  send.setType("text/plain");
-                  send.putExtra(Intent.EXTRA_SUBJECT, "TG WS Proxy — proxy.log");
-                  send.putExtra(Intent.EXTRA_TEXT, "Файл: " + logFile.getAbsolutePath() + "\n\n" + contents);
-                  startActivity(Intent.createChooser(send, "Поделиться логами прокси"));
-              }
-
-          """
-          if 'private void shareLogs()' not in s:
-              if method_marker not in s: raise SystemExit("Could not locate method insertion point in MainActivity")
-              s = s.replace(method_marker, method + method_marker, 1)
-          p.write_text(s)
-          print("Diagnostics export UI and shareLogs() installed")
-          PY
-          echo "Checking export UI and persistent logger:"
-          grep -n 'Поделиться логами\|ACTION_SEND\|private void shareLogs\|RotatingFileHandler\|Persistent diagnostics enabled' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java app/src/main/python/android.py
-          test "$(grep -c 'Поделиться логами' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java)" -ge 1
-          test "$(grep -c 'Intent.ACTION_SEND' app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java)" -eq 1
-          test "$(grep -c 'RotatingFileHandler' app/src/main/python/android.py)" -ge 2
 
       - name: Compile-check embedded Python sources
         run: |
@@ -308,6 +111,6 @@ jobs:
           path: |
             app/build/outputs/apk/debug/app-debug.apk
             app/src/main/java/com/stanryden/tgwsproxy/MainActivity.java
-            app/src/main/python/android.py
+            app/src/main/python/android_bridge.py
           if-no-files-found: error
           retention-days: 14
